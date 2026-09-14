@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tone Link — send text as sound</title>
+<style>
+  :root{
+    --paper:#EAEEF0;
+    --panel:#F7F9FA;
+    --ink:#16212B;
+    --muted:#5C6B77;
+    --rule:#C2CDD4;
+    --mark:#0F6E7E;    /* tone for bit 1 */
+    --space:#9A7B1F;   /* tone for bit 0 */
+    --lead:#5C6B77;    /* preamble tone */
+    --ok:#2E6B41;
+    --bad:#B0342A;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.5;
+    padding:20px 16px 64px;
+    -webkit-text-size-adjust:100%;
+  }
+  .wrap{max-width:680px;margin:0 auto}
+
+  header{margin-bottom:24px}
+  h1{font-size:28px;line-height:1.15;font-weight:650;margin:0 0 6px;letter-spacing:-.02em}
+  header p{margin:0;color:var(--muted);max-width:46ch}
+
+  .panel{
+    background:var(--panel);border:1px solid var(--rule);border-radius:10px;
+    padding:18px;margin-bottom:18px;
+  }
+  .panel h2{font-size:15px;font-weight:650;margin:0 0 14px;letter-spacing:.01em}
+
+  label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px}
+  textarea,input[type=text],select{
+    width:100%;font-family:var(--sans);font-size:16px;color:var(--ink);
+    background:#fff;border:1px solid var(--rule);border-radius:7px;padding:10px 11px;
+  }
+  textarea{resize:vertical;min-height:70px}
+  button{
+    font-family:var(--sans);font-size:15px;font-weight:600;
+    background:var(--ink);color:#fff;border:0;border-radius:7px;
+    padding:12px 18px;cursor:pointer;
+  }
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--rule)}
+  button:disabled{opacity:.45;cursor:default}
+  button:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--mark);outline-offset:2px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+  /* live tone meter — the hero when listening */
+  .meter{display:grid;grid-template-columns:52px 1fr;gap:8px 10px;align-items:center;margin:4px 0 12px}
+  .meter .name{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .bar{height:14px;background:#DFE5E9;border-radius:3px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0%;transition:width .06s linear}
+  .bar.m i{background:var(--mark)}
+  .bar.s i{background:var(--space)}
+  .bar.l i{background:var(--lead)}
+
+  .status{font-size:14px;color:var(--muted);min-height:22px}
+  .status.live{color:var(--mark);font-weight:600}
+
+  .msg{
+    border-left:3px solid var(--rule);padding:10px 12px;margin-top:12px;background:#fff;border-radius:0 7px 7px 0;
+  }
+  .msg.good{border-left-color:var(--ok)}
+  .msg.bad{border-left-color:var(--bad)}
+  .msg .text{font-size:17px;word-break:break-word}
+  .msg .meta{font-size:12.5px;color:var(--muted);margin-top:5px}
+  .bits{font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-all;margin-top:8px;line-height:1.6}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:10px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule)}
+  th{font-weight:600;font-size:12.5px;color:var(--muted)}
+  td.num{font-family:var(--mono)}
+
+  details{margin-top:6px}
+  summary{cursor:pointer;font-size:14px;color:var(--muted)}
+  .note{font-size:13.5px;color:var(--muted);margin-top:10px}
+  canvas{width:100%;height:190px;background:#fff;border:1px solid var(--rule);border-radius:7px;margin-top:12px}
+  @media (max-width:520px){ .grid2{grid-template-columns:1fr} }
+  @media (prefers-reduced-motion:reduce){ .bar i{transition:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Tone Link</h1>
+  <p>Types text on one phone, plays it as tones, decodes it on another. No wifi, no bluetooth — the room is the channel.</p>
+</header>
+
+<!-- ============ LISTEN ============ -->
+<section class="panel">
+  <h2>Listen</h2>
+
+  <div class="meter">
+    <span class="name">lead</span><span class="bar l"><i id="bLead"></i></span>
+    <span class="name">bit 0</span><span class="bar s"><i id="bZero"></i></span>
+    <span class="name">bit 1</span><span class="bar m"><i id="bOne"></i></span>
+  </div>
+
+  <div class="status" id="rxStatus">Mic is off.</div>
+
+  <div class="row">
+    <button id="btnListen">Start listening</button>
+    <button id="btnStop" class="ghost" disabled>Stop</button>
+  </div>
+
+  <div id="inbox"></div>
+</section>
+
+<!-- ============ SEND ============ -->
+<section class="panel">
+  <h2>Send</h2>
+  <label for="txText">Message (max 40 characters)</label>
+  <textarea id="txText" maxlength="40">hello from viraj</textarea>
+  <div class="row">
+    <button id="btnSend">Play message</button>
+    <span class="status" id="txStatus"></span>
+  </div>
+  <p class="note">Turn the volume up. Keep about half a metre between the phones — touching speakers overload the mic.</p>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section class="panel">
+  <h2>Link settings</h2>
+  <p class="note" style="margin-top:0">Both phones must use identical settings.</p>
+  <div class="grid2">
+    <div>
+      <label for="selRate">Speed</label>
+      <select id="selRate">
+        <option value="25">25 bits/sec — most reliable</option>
+        <option value="50" selected>50 bits/sec — default</option>
+        <option value="100">100 bits/sec — fast, more errors</option>
+        <option value="200">200 bits/sec — will break</option>
+      </select>
+    </div>
+    <div>
+      <label for="selCode">Error correction</label>
+      <select id="selCode">
+        <option value="none">CRC only — detects errors</option>
+        <option value="hamming" selected>CRC + Hamming(7,4) — fixes them</option>
+      </select>
+    </div>
+    <div>
+      <label for="selBand">Tone frequencies</label>
+      <select id="selBand">
+        <option value="low">2200 / 2600 / 3000 Hz — quiet speakers</option>
+        <option value="mid" selected>2600 / 3000 / 3400 Hz — default</option>
+        <option value="high">3400 / 3800 / 4200 Hz — noisy room</option>
+      </select>
+    </div>
+    <div>
+      <label for="selVol">Volume</label>
+      <select id="selVol">
+        <option value="0.25">Quiet</option>
+        <option value="0.5" selected>Normal</option>
+        <option value="0.85">Loud</option>
+      </select>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LAB ============ -->
+<section class="panel">
+  <h2>Noise lab</h2>
+  <p class="note" style="margin-top:0">
+    Runs the same encoder and decoder entirely in software, adding measured noise instead of using the room.
+    Use this for your BER graph, and as a backup if the live demo fails.
+  </p>
+  <div class="row">
+    <button id="btnLab" class="ghost">Run noise sweep</button>
+    <span class="status" id="labStatus"></span>
+  </div>
+  <canvas id="berChart" width="640" height="380"></canvas>
+  <div id="labTable"></div>
+</section>
+
+<details class="panel" style="padding:14px 18px">
+  <summary>How it works</summary>
+  <div class="note">
+    <p><strong>Transmit.</strong> Text becomes bytes. A length byte goes in front and a CRC-8 checksum goes on the end.
+    With Hamming on, every 4 bits becomes 7 bits. Each bit is then played as a tone — one frequency for 0, another for 1.
+    A steady lead tone plays first so the receiver knows where the message starts.</p>
+    <p><strong>Receive.</strong> The mic stream is chopped into slices. Each slice is correlated against both tone
+    frequencies using the Goertzel algorithm, which is a single-frequency DFT — a matched filter for one tone.
+    Whichever frequency has more energy wins, and that gives the bit. Hamming repairs any single flipped bit per
+    group of 7; CRC then confirms the whole message survived.</p>
+    <p><strong>Why FSK and not amplitude.</strong> Phones apply automatic gain control to the mic, so absolute
+    loudness is unreliable. Deciding on <em>which of two frequencies is louder</em> is immune to that.</p>
+  </div>
+</details>
+
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   FRAME:  [length byte][payload bytes][CRC-8]
+   Hamming(7,4) is applied per nibble across the whole frame.
+   Bits are sent MSB first.
+   ============================================================ */
+
+const BANDS = { low:[2200,2600,3000], mid:[2600,3000,3400], high:[3400,3800,4200] };
+const PREAMBLE_SYMBOLS = 10;   // length of the lead tone, in bit periods
+const MAX_CHARS = 40;
+
+const cfg = () => {
+  const [fLead,f0,f1] = BANDS[el('selBand').value];
+  return {
+    fLead, f0, f1,
+    bps: parseFloat(el('selRate').value),
+    hamming: el('selCode').value === 'hamming',
+    vol: parseFloat(el('selVol').value)
+  };
+};
+function el(id){ return document.getElementById(id); }
+
+/* ---------- CRC-8, polynomial 0x07 ---------- */
+function crc8(bytes){
+  let c = 0;
+  for (const b of bytes){
+    c ^= b;
+    for (let i=0;i<8;i++) c = (c & 0x80) ? ((c<<1)^0x07) & 0xFF : (c<<1) & 0xFF;
+  }
+  return c;
+}
+
+/* ---------- Hamming(7,4) ----------
+   codeword order: p1 p2 d1 p3 d2 d3 d4   (d1 is the nibble's MSB) */
+function hammingEncode(nib){
+  const d1=(nib>>3)&1, d2=(nib>>2)&1, d3=(nib>>1)&1, d4=nib&1;
+  const p1=d1^d2^d4, p2=d1^d3^d4, p3=d2^d3^d4;
+  return [p1,p2,d1,p3,d2,d3,d4];
+}
+function hammingDecode(c){            // c = array of 7 bits; returns {nibble, corrected}
+  const b = c.slice();
+  const s1 = b[0]^b[2]^b[4]^b[6];
+  const s2 = b[1]^b[2]^b[5]^b[6];
+  const s3 = b[3]^b[4]^b[5]^b[6];
+  const pos = s1 + 2*s2 + 4*s3;       // 1-indexed position of the bad bit, 0 = clean
+  let corrected = false;
+  if (pos > 0 && pos <= 7){ b[pos-1] ^= 1; corrected = true; }
+  return { nibble:(b[2]<<3)|(b[4]<<2)|(b[5]<<1)|b[6], corrected };
+}
+
+/* ---------- framing ---------- */
+function bytesToBits(bytes, hamming){
+  const bits = [];
+  for (const byte of bytes){
+    if (hamming){
+      bits.push(...hammingEncode((byte>>4)&0x0F));
+      bits.push(...hammingEncode(byte&0x0F));
+    } else {
+      for (let i=7;i>=0;i--) bits.push((byte>>i)&1);
+    }
+  }
+  return bits;
+}
+function bitsToByte(bits, hamming){    // consumes exactly bitsPerByte(hamming) bits
+  if (!hamming){
+    let v=0; for (let i=0;i<8;i++) v = (v<<1) | bits[i];
+    return { value:v, corrected:0 };
+  }
+  const hi = hammingDecode(bits.slice(0,7));
+  const lo = hammingDecode(bits.slice(7,14));
+  return { value:(hi.nibble<<4)|lo.nibble, corrected:(hi.corrected?1:0)+(lo.corrected?1:0) };
+}
+const bitsPerByte = h => h ? 14 : 8;
+
+function buildFrame(text){
+  const payload = Array.from(new TextEncoder().encode(text));
+  if (payload.length > 255) throw new Error("too long");
+  const frame = [payload.length, ...payload];
+  frame.push(crc8(frame));
+  return frame;
+}
+
+/* ---------- modulator: phase-continuous FSK ---------- */
+function modulate(bits, fs, c){
+  const S = Math.round(fs / c.bps);
+  const leadLen = PREAMBLE_SYMBOLS * S;
+  const padLen  = Math.round(fs * 0.08);
+  const total   = padLen + leadLen + bits.length*S + padLen;
+  const out = new Float32Array(total);
+  let phase = 0, n = padLen;
+
+  const tone = (freq, len) => {
+    const step = 2*Math.PI*freq/fs;
+    for (let i=0;i<len;i++){ out[n++] = Math.sin(phase); phase += step; if (phase>2*Math.PI) phase -= 2*Math.PI; }
+  };
+  tone(c.fLead, leadLen);
+  for (const b of bits) tone(b ? c.f1 : c.f0, S);
+
+  // 5 ms raised edges so the speaker doesn't click
+  const ramp = Math.round(fs*0.005);
+  for (let i=0;i<ramp;i++){
+    const w = 0.5 - 0.5*Math.cos(Math.PI*i/ramp);
+    out[padLen+i] *= w;
+    out[total-padLen-1-i] *= w;
+  }
+  for (let i=0;i<out.length;i++) out[i] *= c.vol;
+  return out;
+}
+
+/* ---------- Goertzel: energy at one frequency over one slice ---------- */
+function goertzel(buf, start, len, freq, fs){
+  const w = 2*Math.PI*freq/fs, coeff = 2*Math.cos(w);
+  let s1=0, s2=0;
+  const N = buf.length;
+  for (let i=0;i<len;i++){
+    const x = buf[(start+i) % N];
+    const s0 = x + coeff*s1 - s2;
+    s2 = s1; s1 = s0;
+  }
+  return Math.max(0, s1*s1 + s2*s2 - coeff*s1*s2) / len;
+}
+
+/* ============================================================
+   DEMODULATOR
+   Feed it audio with push(). It hunts for the lead tone, locks
+   the bit clock to the moment the lead tone stops, then samples
+   the middle of every bit period.
+   ============================================================ */
+class Demod {
+  constructor(fs, c, onResult, onMeter){
+    this.fs = fs; this.c = c;
+    this.onResult = onResult; this.onMeter = onMeter;
+    this.S = Math.round(fs / c.bps);
+    this.hop = Math.max(8, Math.round(this.S/4));
+    this.win = Math.round(this.S*0.8);
+    this.cap = fs * 45;
+    this.buf = new Float32Array(this.cap);
+    this.wr = 0;                 // absolute samples written
+    this.rd = 0;                 // absolute read cursor
+    this.reset();
+  }
+  reset(){
+    this.state = 'search';
+    this.leadRun = 0; this.leadPeak = 0; this.t0 = 0;
+    this.bits = []; this.conf = []; this.need = bitsPerByte(this.c.hamming);
+    this.frameLen = null;
+  }
+  push(chunk){
+    for (let i=0;i<chunk.length;i++) this.buf[(this.wr+i) % this.cap] = chunk[i];
+    this.wr += chunk.length;
+    if (this.wr - this.rd > this.cap - this.fs) this.rd = this.wr - this.cap + this.fs; // overrun guard
+    this.run();
+  }
+  energies(at, len){
+    return {
+      L: goertzel(this.buf, at, len, this.c.fLead, this.fs),
+      Z: goertzel(this.buf, at, len, this.c.f0, this.fs),
+      O: goertzel(this.buf, at, len, this.c.f1, this.fs)
+    };
+  }
+  run(){
+    while (true){
+      if (this.state === 'search' || this.state === 'lead'){
+        if (this.wr - this.rd < this.win) return;
+        const e = this.energies(this.rd, this.win);
+        if (this.onMeter) this.onMeter(e);
+        const others = e.Z + e.O + 1e-12;
+
+        if (this.state === 'search'){
+          if (e.L > others*2.2 && e.L > 1e-6){ this.leadRun++; this.leadPeak = Math.max(this.leadPeak, e.L); }
+          else this.leadRun = 0;
+          if (this.leadRun >= 6){ this.state = 'lead'; }
+          this.rd += this.hop;
+        } else {                       // in 'lead' — waiting for the tone to stop
+          this.leadPeak = Math.max(this.leadPeak, e.L);
+          if (e.L < this.leadPeak*0.45){
+            this.t0 = this.refineStart(this.rd - this.hop*2);
+            this.state = 'data';
+          } else {
+            this.rd += this.hop;
+            if (this.wr - this.rd > this.fs*4){ this.reset(); return; }   // stuck on a hum
+          }
+        }
+        continue;
+      }
+
+      if (this.state === 'data'){
+        const i = this.bits.length;
+        const from = this.t0 + i*this.S + Math.round(this.S*0.2);
+        const len  = Math.round(this.S*0.6);
+        if (this.wr < from + len + this.hop) return;                       // wait for more audio
+
+        const z = goertzel(this.buf, from, len, this.c.f0, this.fs);
+        const o = goertzel(this.buf, from, len, this.c.f1, this.fs);
+        this.bits.push(o > z ? 1 : 0);
+        this.conf.push(Math.abs(o-z)/(o+z+1e-12));
+
+        if (this.frameLen === null && this.bits.length === this.need){
+          const lenByte = bitsToByte(this.bits.slice(0,this.need), this.c.hamming).value;
+          if (lenByte === 0 || lenByte > MAX_CHARS*4){ this.finish(false, "Lead tone found but the length field was garbage."); return; }
+          this.frameLen = lenByte;
+          this.need = (1 + lenByte + 1) * bitsPerByte(this.c.hamming);     // len + payload + crc
+        }
+        if (this.frameLen !== null && this.bits.length >= this.need){ this.decodeFrame(); return; }
+        continue;
+      }
+      return;
+    }
+  }
+  // find the exact sample where the lead tone stopped, to ~1 ms
+  refineStart(from){
+    const step = Math.max(4, Math.round(this.S/16));
+    const w = Math.round(this.S*0.35);
+    let at = Math.max(this.rd - this.hop*3, from);
+    for (let k=0;k<Math.round(this.S*3/step);k++){
+      const p = goertzel(this.buf, at, w, this.c.fLead, this.fs);
+      if (p < this.leadPeak*0.40) return at;
+      at += step;
+    }
+    return at;
+  }
+  decodeFrame(){
+    const bpb = bitsPerByte(this.c.hamming);
+    const bytes = []; let fixed = 0;
+    for (let i=0;i+bpb<=this.bits.length;i+=bpb){
+      const r = bitsToByte(this.bits.slice(i,i+bpb), this.c.hamming);
+      bytes.push(r.value); fixed += r.corrected;
+    }
+    const len = bytes[0];
+    const payload = bytes.slice(1, 1+len);
+    const crcRx = bytes[1+len];
+    const crcOk = crc8([len, ...payload]) === crcRx;
+    let text = "";
+    try { text = new TextDecoder().decode(new Uint8Array(payload)); } catch(e){ text = "(undecodable bytes)"; }
+    const avgConf = this.conf.reduce((a,b)=>a+b,0)/Math.max(1,this.conf.length);
+    this.onResult({ ok:crcOk, text, fixed, bits:this.bits.slice(), confidence:avgConf });
+    this.reset();
+  }
+  finish(ok, why){ this.onResult({ ok, text:null, why }); this.reset(); }
+}
+
+/* ============================================================
+   AUDIO
+   ============================================================ */
+let ctx = null, micStream = null, micNode = null, proc = null, demod = null;
+
+function audioCtx(){
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') ctx.resume();
+  return ctx;
+}
+
+el('btnSend').addEventListener('click', async () => {
+  const text = el('txText').value.slice(0, MAX_CHARS);
+  if (!text.trim()){ el('txStatus').textContent = "Type something first."; return; }
+  const a = audioCtx(), c = cfg();
+  const bits = bytesToBits(buildFrame(text), c.hamming);
+  const samples = modulate(bits, a.sampleRate, c);
+
+  const buf = a.createBuffer(1, samples.length, a.sampleRate);
+  buf.copyToChannel(samples, 0);
+  const src = a.createBufferSource();
+  src.buffer = buf; src.connect(a.destination); src.start();
+
+  const secs = (samples.length/a.sampleRate).toFixed(1);
+  el('txStatus').textContent = `Playing — ${bits.length} bits, ${secs}s`;
+  src.onended = () => { el('txStatus').textContent = `Sent ${bits.length} bits in ${secs}s`; };
+});
+
+el('btnListen').addEventListener('click', async () => {
+  try {
+    // These three must be off. Phone voice processing destroys the tones.
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+    });
+  } catch(e){
+    el('rxStatus').textContent = "Mic blocked. The page must be on https (or localhost) and you have to allow the permission.";
+    return;
+  }
+  const a = audioCtx();
+  micNode = a.createMediaStreamSource(micStream);
+  proc = a.createScriptProcessor(2048, 1, 1);
+  demod = new Demod(a.sampleRate, cfg(), showResult, showMeter);
+
+  proc.onaudioprocess = e => demod.push(e.inputBuffer.getChannelData(0));
+  micNode.connect(proc);
+  const mute = a.createGain(); mute.gain.value = 0;
+  proc.connect(mute); mute.connect(a.destination);
+
+  el('btnListen').disabled = true; el('btnStop').disabled = false;
+  el('rxStatus').textContent = "Listening for the lead tone…";
+  el('rxStatus').className = "status live";
+});
+
+el('btnStop').addEventListener('click', stopListening);
+function stopListening(){
+  if (proc){ proc.disconnect(); proc.onaudioprocess = null; proc = null; }
+  if (micNode){ micNode.disconnect(); micNode = null; }
+  if (micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  demod = null;
+  el('btnListen').disabled = false; el('btnStop').disabled = true;
+  el('rxStatus').textContent = "Mic is off."; el('rxStatus').className = "status";
+  showMeter({L:0,Z:0,O:0});
+}
+['selRate','selCode','selBand'].forEach(id =>
+  el(id).addEventListener('change', () => { if (micStream){ stopListening(); el('rxStatus').textContent = "Settings changed — start listening again."; } })
+);
+
+let meterMax = 1e-9;
+function showMeter(e){
+  meterMax = Math.max(meterMax*0.995, e.L, e.Z, e.O, 1e-9);
+  const pct = v => Math.min(100, Math.sqrt(v/meterMax)*100).toFixed(0) + "%";
+  el('bLead').style.width = pct(e.L);
+  el('bZero').style.width = pct(e.Z);
+  el('bOne').style.width  = pct(e.O);
+}
+
+function showResult(r){
+  const box = document.createElement('div');
+  if (r.text === null){
+    box.className = "msg bad";
+    box.innerHTML = `<div class="text">Lost it</div><div class="meta">${r.why || "Decode failed."}</div>`;
+  } else {
+    box.className = "msg " + (r.ok ? "good" : "bad");
+    const meta = r.ok
+      ? `CRC passed · ${r.fixed} bit${r.fixed===1?'':'s'} repaired · confidence ${(r.confidence*100).toFixed(0)}%`
+      : `CRC failed — this text is corrupted · ${r.fixed} repair attempt${r.fixed===1?'':'s'} · confidence ${(r.confidence*100).toFixed(0)}%`;
+    box.innerHTML = `<div class="text">${escapeHtml(r.text)}</div><div class="meta">${meta}</div>`;
+    const b = document.createElement('div');
+    b.className = "bits"; b.textContent = r.bits.join("");
+    box.appendChild(b);
+  }
+  el('inbox').prepend(box);
+  while (el('inbox').children.length > 6) el('inbox').lastChild.remove();
+  el('rxStatus').textContent = "Listening for the lead tone…";
+}
+function escapeHtml(s){ return s.replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+
+/* ============================================================
+   NOISE LAB — same encoder and decoder, simulated channel
+   ============================================================ */
+function addNoise(sig, snrDb){
+  let p = 0; for (let i=0;i<sig.length;i++) p += sig[i]*sig[i];
+  p /= sig.length;
+  const nP = p / Math.pow(10, snrDb/10);
+  const sd = Math.sqrt(nP);
+  const out = new Float32Array(sig.length);
+  for (let i=0;i<sig.length;i++){
+    // Box-Muller
+    const u = Math.random()||1e-12, v = Math.random();
+    out[i] = sig[i] + sd*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+  }
+  return out;
+}
+
+function trial(text, snrDb, hamming, fs, base){
+  const c = {...base, hamming, vol:0.5};
+  const frame = buildFrame(text);
+  const bits = bytesToBits(frame, hamming);
+  const noisy = addNoise(modulate(bits, fs, c), snrDb);
+
+  let res = null;
+  const d = new Demod(fs, c, r => { if (!res) res = r; }, null);
+  const CH = 2048;
+  for (let i=0;i<noisy.length && !res;i+=CH) d.push(noisy.subarray(i, Math.min(i+CH, noisy.length)));
+
+  if (!res || res.text === null) return { ok:false, bitErrors:bits.length, totalBits:bits.length };
+  let errs = 0;
+  const n = Math.min(bits.length, res.bits.length);
+  for (let i=0;i<n;i++) if (bits[i] !== res.bits[i]) errs++;
+  errs += Math.abs(bits.length - res.bits.length);
+  return { ok:res.ok && res.text === text, bitErrors:errs, totalBits:bits.length };
+}
+
+el('btnLab').addEventListener('click', async () => {
+  const btn = el('btnLab'); btn.disabled = true;
+  el('labStatus').textContent = "Running…";
+  const fs = 48000, base = cfg();
+  const text = "digital communication";
+  const snrs = [-12,-9,-6,-3,0,3,6,9];
+  const REPS = 6;
+  const rows = [];
+
+  for (const snr of snrs){
+    const acc = { none:{e:0,t:0,ok:0}, hamming:{e:0,t:0,ok:0} };
+    for (const mode of ['none','hamming']){
+      for (let r=0;r<REPS;r++){
+        const t = trial(text, snr, mode==='hamming', fs, base);
+        acc[mode].e += t.bitErrors; acc[mode].t += t.totalBits; acc[mode].ok += t.ok ? 1 : 0;
+      }
+    }
+    rows.push({
+      snr,
+      berNone: acc.none.e/acc.none.t,
+      berHam:  acc.hamming.e/acc.hamming.t,
+      okNone:  acc.none.ok/REPS,
+      okHam:   acc.hamming.ok/REPS
+    });
+    el('labStatus').textContent = `Running… ${snr} dB done`;
+    await new Promise(r => setTimeout(r, 0));   // let the UI breathe
+  }
+  drawChart(rows); drawTable(rows);
+  el('labStatus').textContent = `Done — ${snrs.length} noise levels, ${REPS} messages each`;
+  btn.disabled = false;
+});
+
+function drawTable(rows){
+  let h = `<table><tr><th>SNR (dB)</th><th>BER uncoded</th><th>BER Hamming</th><th>Messages OK</th></tr>`;
+  for (const r of rows){
+    h += `<tr><td class="num">${r.snr}</td>
+            <td class="num">${r.berNone.toExponential(1)}</td>
+            <td class="num">${r.berHam.toExponential(1)}</td>
+            <td class="num">${(r.okNone*100).toFixed(0)}% / ${(r.okHam*100).toFixed(0)}%</td></tr>`;
+  }
+  el('labTable').innerHTML = h + `</table><p class="note">Last column is uncoded / Hamming. Screenshot this for the report.</p>`;
+}
+
+function drawChart(rows){
+  const cv = el('berChart'), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height, pad = {l:58,r:14,t:16,b:40};
+  g.clearRect(0,0,W,H);
+  const floor = 1e-3;
+  const xs = rows.map(r => r.snr);
+  const x = v => pad.l + (v - Math.min(...xs))/(Math.max(...xs)-Math.min(...xs)) * (W-pad.l-pad.r);
+  const y = v => { const t = Math.log10(Math.max(v,floor)/floor)/Math.log10(1/floor); return H-pad.b - t*(H-pad.t-pad.b); };
+
+  g.strokeStyle = "#C2CDD4"; g.fillStyle = "#5C6B77"; g.font = "12px ui-monospace,monospace"; g.lineWidth = 1;
+  for (const p of [1, 0.1, 0.01, 0.001]){
+    g.beginPath(); g.moveTo(pad.l, y(p)); g.lineTo(W-pad.r, y(p)); g.stroke();
+    g.fillText(p.toString(), 8, y(p)+4);
+  }
+  for (const s of xs){ g.fillText(s+"", x(s)-8, H-pad.b+18); }
+  g.fillText("SNR (dB)", W/2-26, H-8);
+
+  const line = (key, color) => {
+    g.strokeStyle = color; g.lineWidth = 2; g.beginPath();
+    rows.forEach((r,i) => { const px = x(r.snr), py = y(r[key]); i ? g.lineTo(px,py) : g.moveTo(px,py); });
+    g.stroke();
+    g.fillStyle = color;
+    rows.forEach(r => { g.beginPath(); g.arc(x(r.snr), y(r[key]), 3.5, 0, 7); g.fill(); });
+  };
+  line('berNone', "#9A7B1F");
+  line('berHam',  "#0F6E7E");
+
+  g.font = "13px system-ui,sans-serif";
+  g.fillStyle = "#9A7B1F"; g.fillText("uncoded", W-pad.r-150, pad.t+14);
+  g.fillStyle = "#0F6E7E"; g.fillText("Hamming(7,4)", W-pad.r-80, pad.t+14);
+}
+</script>
+</body>
+</html>

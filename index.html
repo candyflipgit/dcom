@@ -118,6 +118,24 @@
   <div id="inbox"></div>
 </section>
 
+<!-- ============ BREAKDOWN ============ -->
+<section class="panel" id="breakdown" hidden>
+  <h2>What just arrived</h2>
+
+  <div class="grid2">
+    <div>
+      <p class="note" style="margin:0 0 6px">Decision space — where every bit landed</p>
+      <canvas id="cvSpace" width="480" height="380"></canvas>
+    </div>
+    <div>
+      <p class="note" style="margin:0 0 6px">Decision margin, bit by bit</p>
+      <canvas id="cvMargin" width="480" height="380"></canvas>
+    </div>
+  </div>
+
+  <div id="charTable"></div>
+</section>
+
 <!-- ============ SEND ============ -->
 <section class="panel">
   <h2>Send</h2>
@@ -367,7 +385,8 @@ class Demod {
   reset(){
     this.state = 'search';
     this.leadRun = 0; this.leadPeak = 0; this.t0 = 0; this.t0raw = 0;
-    this.bits = []; this.conf = []; this.need = bitsPerByte(this.c.hamming);
+    this.bits = []; this.conf = []; this.e0 = []; this.e1 = [];
+    this.need = bitsPerByte(this.c.hamming);
     this.frameLen = null;
   }
   push(chunk){
@@ -432,6 +451,7 @@ class Demod {
         const o = goertzel(this.buf, from, len, this.c.f1, this.fs);
         this.bits.push(o > z ? 1 : 0);
         this.conf.push(Math.abs(o-z)/(o+z+1e-12));
+        this.e0.push(z); this.e1.push(o);
 
         if (this.frameLen === null && this.bits.length === this.need){
           const lenByte = bitsToByte(this.bits.slice(0,this.need), this.c.hamming).value;
@@ -484,10 +504,12 @@ class Demod {
   }
   decodeFrame(){
     const bpb = bitsPerByte(this.c.hamming);
-    const bytes = []; let fixed = 0;
+    const bytes = [], info = []; let fixed = 0;
     for (let i=0;i+bpb<=this.bits.length;i+=bpb){
-      const r = bitsToByte(this.bits.slice(i,i+bpb), this.c.hamming);
+      const slice = this.bits.slice(i,i+bpb);
+      const r = bitsToByte(slice, this.c.hamming);
       bytes.push(r.value); fixed += r.corrected;
+      info.push({ value:r.value, sent:slice, corrected:r.corrected, at:i });
     }
     const len = bytes[0];
     const payload = bytes.slice(1, 1+len);
@@ -496,7 +518,11 @@ class Demod {
     let text = "";
     try { text = new TextDecoder().decode(new Uint8Array(payload)); } catch(e){ text = "(undecodable bytes)"; }
     const avgConf = this.conf.reduce((a,b)=>a+b,0)/Math.max(1,this.conf.length);
-    this.onResult({ ok:crcOk, text, fixed, bits:this.bits.slice(), confidence:avgConf });
+    this.onResult({
+      ok:crcOk, text, fixed, bits:this.bits.slice(), confidence:avgConf,
+      bytes:info, length:len, crcRx, crcCalc:crc8([len, ...payload]),
+      e0:this.e0.slice(), e1:this.e1.slice(), conf:this.conf.slice(), hamming:this.c.hamming
+    });
     this.reset();
   }
   finish(ok, why){ this.onResult({ ok, text:null, why }); this.reset(); }
@@ -596,6 +622,92 @@ function showResult(r){
   el('inbox').prepend(box);
   while (el('inbox').children.length > 6) el('inbox').lastChild.remove();
   el('rxStatus').textContent = "Listening for the lead tone…";
+  if (r.bytes) renderBreakdown(r);
+}
+
+/* ---------- breakdown of the most recent message ---------- */
+function renderBreakdown(r){
+  el('breakdown').hidden = false;
+  drawSpace(r);
+  drawMargin(r);
+  drawChars(r);
+}
+
+// Every bit plotted as (energy at tone 0, energy at tone 1).
+// Clean bits sit hard against one axis; noisy ones drift toward the diagonal,
+// which is the decision boundary. Same idea as a signal space diagram.
+function drawSpace(r){
+  const cv = el('cvSpace'), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height, pad = 42;
+  g.clearRect(0,0,W,H);
+  const max = Math.max(...r.e0, ...r.e1, 1e-12);
+  const sx = v => pad + Math.sqrt(v/max)*(W-pad-16);
+  const sy = v => H-pad - Math.sqrt(v/max)*(H-pad-16);
+
+  g.strokeStyle = "#C2CDD4"; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(pad, H-pad); g.lineTo(W-16, H-pad); g.moveTo(pad, H-pad); g.lineTo(pad, 16); g.stroke();
+  g.setLineDash([4,4]); g.strokeStyle = "#8FA0AC";
+  g.beginPath(); g.moveTo(pad, H-pad); g.lineTo(Math.min(W-16, pad+(H-pad-16)), 16); g.stroke();
+  g.setLineDash([]);
+
+  for (let i=0;i<r.e0.length;i++){
+    g.fillStyle = r.bits[i] ? "rgba(15,110,126,.72)" : "rgba(154,123,31,.72)";
+    g.beginPath(); g.arc(sx(r.e0[i]), sy(r.e1[i]), 4, 0, 7); g.fill();
+  }
+  g.fillStyle = "#5C6B77"; g.font = "12px system-ui,sans-serif";
+  g.fillText("energy at tone 0 →", pad, H-14);
+  g.save(); g.translate(14, H-pad); g.rotate(-Math.PI/2); g.fillText("energy at tone 1 →", 0, 0); g.restore();
+  g.fillStyle = "#8FA0AC"; g.fillText("decision boundary", W-150, 30);
+}
+
+// How confident each bit was. Short bars are the ones that nearly flipped.
+function drawMargin(r){
+  const cv = el('cvMargin'), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height, pad = {l:38,r:14,t:16,b:38};
+  g.clearRect(0,0,W,H);
+  const n = r.conf.length, bw = (W-pad.l-pad.r)/Math.max(n,1);
+
+  g.strokeStyle = "#C2CDD4"; g.fillStyle = "#5C6B77"; g.font = "11px ui-monospace,monospace";
+  for (const t of [0,0.5,1]){
+    const y = H-pad.b - t*(H-pad.t-pad.b);
+    g.beginPath(); g.moveTo(pad.l,y); g.lineTo(W-pad.r,y); g.stroke();
+    g.fillText(t.toFixed(1), 8, y+4);
+  }
+  for (let i=0;i<n;i++){
+    const h = r.conf[i]*(H-pad.t-pad.b);
+    g.fillStyle = r.bits[i] ? "#0F6E7E" : "#9A7B1F";
+    g.fillRect(pad.l + i*bw, H-pad.b-h, Math.max(1, bw-0.8), h);
+  }
+  g.fillStyle = "#5C6B77"; g.font = "12px system-ui,sans-serif";
+  g.fillText(`bit number (${n} bits)`, W/2-52, H-10);
+}
+
+// The whole chain for one character, left to right.
+function drawChars(r){
+  const start = 1, end = 1 + r.length;          // byte 0 is length, last is CRC
+  const rows = r.bytes.slice(start, end);
+  let h = `<table><tr><th>Char</th><th>Byte</th><th>Bits in the character</th>`;
+  if (r.hamming) h += `<th>Bits actually sent</th>`;
+  h += `<th>Repairs</th></tr>`;
+
+  for (const b of rows){
+    const ch = b.value === 32 ? "space" : (b.value > 32 && b.value < 127 ? String.fromCharCode(b.value) : "·");
+    const raw = b.value.toString(2).padStart(8,"0");
+    h += `<tr><td>${escapeHtml(ch)}</td>
+            <td class="num">${b.value}</td>
+            <td class="num">${raw}</td>`;
+    if (r.hamming){
+      const s = b.sent.join("");
+      h += `<td class="num">${s.slice(0,7)} ${s.slice(7)}</td>`;
+    }
+    h += `<td class="num"${b.corrected?' style="color:var(--bad)"':''}>${b.corrected||"—"}</td></tr>`;
+  }
+  h += `</table>`;
+
+  const note = r.hamming
+    ? `Length byte said ${r.length} characters. CRC sent ${r.crcRx}, CRC calculated ${r.crcCalc} — ${r.crcRx===r.crcCalc?"match":"mismatch"}. Each 4 bits of a character travel as 7 bits; the extra 3 are what allow a flipped bit to be repaired.`
+    : `Length byte said ${r.length} characters. CRC sent ${r.crcRx}, CRC calculated ${r.crcCalc} — ${r.crcRx===r.crcCalc?"match":"mismatch"}. With Hamming off, errors can be detected but not repaired.`;
+  el('charTable').innerHTML = h + `<p class="note">${note}</p>`;
 }
 function escapeHtml(s){ return s.replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
 

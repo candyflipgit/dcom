@@ -138,8 +138,8 @@
     <div>
       <label for="selRate">Speed</label>
       <select id="selRate">
-        <option value="25">25 bits/sec — most reliable</option>
-        <option value="50" selected>50 bits/sec — default</option>
+        <option value="25" selected>25 bits/sec — most reliable</option>
+        <option value="50">50 bits/sec — faster</option>
         <option value="100">100 bits/sec — fast, more errors</option>
         <option value="200">200 bits/sec — will break</option>
       </select>
@@ -214,6 +214,10 @@
 const BANDS = { low:[2200,2600,3000], mid:[2600,3000,3400], high:[3400,3800,4200] };
 const PREAMBLE_SYMBOLS = 10;   // length of the lead tone, in bit periods
 const MAX_CHARS = 40;
+// A known byte sent straight after the lead tone. The receiver slides its bit
+// clock around until it reproduces this pattern — that's how it finds the
+// exact start of the data. Never Hamming-coded; it has to be raw and known.
+const SYNC_BITS = [1,0,1,0,0,1,0,1];   // 0xA5
 
 const cfg = () => {
   const [fLead,f0,f1] = BANDS[el('selBand').value];
@@ -291,7 +295,7 @@ function modulate(bits, fs, c){
   const S = Math.round(fs / c.bps);
   const leadLen = PREAMBLE_SYMBOLS * S;
   const padLen  = Math.round(fs * 0.08);
-  const total   = padLen + leadLen + bits.length*S + padLen;
+  const total   = padLen + leadLen + (SYNC_BITS.length + bits.length)*S + padLen;
   const out = new Float32Array(total);
   let phase = 0, n = padLen;
 
@@ -300,7 +304,8 @@ function modulate(bits, fs, c){
     for (let i=0;i<len;i++){ out[n++] = Math.sin(phase); phase += step; if (phase>2*Math.PI) phase -= 2*Math.PI; }
   };
   tone(c.fLead, leadLen);
-  for (const b of bits) tone(b ? c.f1 : c.f0, S);
+  for (const b of SYNC_BITS) tone(b ? c.f1 : c.f0, S);
+  for (const b of bits)      tone(b ? c.f1 : c.f0, S);
 
   // 5 ms raised edges so the speaker doesn't click
   const ramp = Math.round(fs*0.005);
@@ -347,7 +352,7 @@ class Demod {
   }
   reset(){
     this.state = 'search';
-    this.leadRun = 0; this.leadPeak = 0; this.t0 = 0;
+    this.leadRun = 0; this.leadPeak = 0; this.t0 = 0; this.t0raw = 0;
     this.bits = []; this.conf = []; this.need = bitsPerByte(this.c.hamming);
     this.frameLen = null;
   }
@@ -380,13 +385,26 @@ class Demod {
         } else {                       // in 'lead' — waiting for the tone to stop
           this.leadPeak = Math.max(this.leadPeak, e.L);
           if (e.L < this.leadPeak*0.45){
-            this.t0 = this.refineStart(this.rd - this.hop*2);
-            this.state = 'data';
+            this.t0raw = this.refineStart(this.rd - this.hop*2);
+            this.state = 'align';
           } else {
             this.rd += this.hop;
             if (this.wr - this.rd > this.fs*4){ this.reset(); return; }   // stuck on a hum
           }
         }
+        continue;
+      }
+
+      if (this.state === 'align'){
+        // wait until the sync byte has definitely been recorded
+        if (this.wr < this.t0raw + this.S*11) return;
+        const lock = this.findAlignment();
+        if (!lock){
+          this.finish(false, "Heard the lead tone but couldn't lock onto the bit clock. Try a slower speed.");
+          return;
+        }
+        this.t0 = lock.start + SYNC_BITS.length*this.S;   // data begins after the sync byte
+        this.state = 'data';
         continue;
       }
 
@@ -413,6 +431,31 @@ class Demod {
       return;
     }
   }
+  // Slide the bit clock across a window either side of the rough lead-tone end.
+  // For each candidate, decode 8 bits and see how many match the known sync byte.
+  // Best match wins; anything under 7 of 8 means we never really locked on.
+  findAlignment(){
+    const S = this.S, step = Math.max(4, Math.round(S/24));
+    const from = -Math.round(S*0.8), to = Math.round(S*1.0);
+    let best = null;
+    for (let off = from; off <= to; off += step){
+      const start = this.t0raw + off;
+      let score = 0, conf = 0, usable = true;
+      for (let i=0;i<SYNC_BITS.length;i++){
+        const at = start + i*S + Math.round(S*0.2), len = Math.round(S*0.6);
+        if (at + len > this.wr || at < 0){ usable = false; break; }
+        const z = goertzel(this.buf, at, len, this.c.f0, this.fs);
+        const o = goertzel(this.buf, at, len, this.c.f1, this.fs);
+        if ((o > z ? 1 : 0) === SYNC_BITS[i]) score++;
+        conf += Math.abs(o-z)/(o+z+1e-12);
+      }
+      if (!usable) continue;
+      const total = score + conf/100;              // confidence only breaks ties
+      if (!best || total > best.total) best = { total, score, start };
+    }
+    return (best && best.score >= 7) ? best : null;
+  }
+
   // find the exact sample where the lead tone stopped, to ~1 ms
   refineStart(from){
     const step = Math.max(4, Math.round(this.S/16));

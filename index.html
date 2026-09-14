@@ -133,12 +133,18 @@
 <!-- ============ SETTINGS ============ -->
 <section class="panel">
   <h2>Link settings</h2>
-  <p class="note" style="margin-top:0">Both phones must use identical settings.</p>
+  <p class="note" style="margin-top:0">
+    Both phones must use identical settings. For a noisy room: go slower and pick wider spacing.
+    Slower means each bit is measured over more audio, so noise averages out. Wider spacing means
+    a sound has to be far off-frequency to be mistaken for the other tone.
+  </p>
   <div class="grid2">
     <div>
       <label for="selRate">Speed</label>
       <select id="selRate">
-        <option value="25" selected>25 bits/sec — most reliable</option>
+        <option value="6.25">6 bits/sec — crawls, survives anything</option>
+        <option value="12.5">12 bits/sec — noisy classroom</option>
+        <option value="25" selected>25 bits/sec — reliable</option>
         <option value="50">50 bits/sec — faster</option>
         <option value="100">100 bits/sec — fast, more errors</option>
         <option value="200">200 bits/sec — will break</option>
@@ -155,8 +161,10 @@
       <label for="selBand">Tone frequencies</label>
       <select id="selBand">
         <option value="low">2200 / 2600 / 3000 Hz — quiet speakers</option>
-        <option value="mid" selected>2600 / 3000 / 3400 Hz — default</option>
-        <option value="high">3400 / 3800 / 4200 Hz — noisy room</option>
+        <option value="mid">2600 / 3000 / 3400 Hz — close spacing</option>
+        <option value="high">3400 / 3800 / 4200 Hz — above most voices</option>
+        <option value="wide" selected>2400 / 3400 / 4400 Hz — wide spacing</option>
+        <option value="vwide">2600 / 3900 / 4900 Hz — widest</option>
       </select>
     </div>
     <div>
@@ -211,7 +219,13 @@
    Bits are sent MSB first.
    ============================================================ */
 
-const BANDS = { low:[2200,2600,3000], mid:[2600,3000,3400], high:[3400,3800,4200] };
+const BANDS = {
+  low:  [2200,2600,3000],   // 400 Hz apart
+  mid:  [2600,3000,3400],
+  high: [3400,3800,4200],
+  wide: [2400,3400,4400],   // 1000 Hz apart — much harder for noise to confuse
+  vwide:[2600,3900,4900]    // widest that most phone speakers still reproduce
+};
 const PREAMBLE_SYMBOLS = 10;   // length of the lead tone, in bit periods
 const MAX_CHARS = 40;
 // A known byte sent straight after the lead tone. The receiver slides its bit
